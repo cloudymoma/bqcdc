@@ -1,5 +1,7 @@
 # BigQuery CDC Demo
 
+[![Build](https://github.com/bindiego/bqcdc/actions/workflows/build.yml/badge.svg)](https://github.com/bindiego/bqcdc/actions/workflows/build.yml)
+
 A complete demonstration of Change Data Capture (CDC) from MySQL to BigQuery using Google Cloud Platform services.
 
 ## Architecture
