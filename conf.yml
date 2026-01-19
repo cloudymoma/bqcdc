@@ -1,0 +1,51 @@
+# BigQuery CDC Demo Configuration
+# All settings can be customized here
+
+# GCP Project Configuration
+gcp:
+  project_id: "du-hast-mich"
+  region: "us-central1"
+  service_account_path: "~/workspace/google/sa.json"
+
+# MySQL Configuration (Cloud SQL)
+mysql:
+  instance_name: "dingomysql"
+  db_name: "dingocdc"
+  table_name: "item"
+  # Machine type for Cloud SQL instance
+  tier: "db-f1-micro"
+  # MySQL version
+  version: "MYSQL_8_0"
+  # Root user (default)
+  root_user: "root"
+
+# BigQuery Configuration
+bigquery:
+  dataset: "dingocdc"
+  table_name: "item"
+  # Location for the dataset
+  location: "US"
+
+# Dataflow Configuration
+dataflow:
+  job_name: "dingo-cdc"
+  # Worker configuration
+  num_workers: 1
+  max_workers: 2
+  machine_type: "e2-medium"
+  # Streaming mode for CDC
+  streaming: true
+  # Temp location for Dataflow
+  temp_location_suffix: "dataflow/temp"
+  # Staging location for Dataflow
+  staging_location_suffix: "dataflow/staging"
+
+# Streaming CDC Configuration
+cdc:
+  # Polling interval in seconds - how often to check for changes
+  polling_interval_seconds: 10
+  # Behavior when the in-memory timestamp is null/empty at startup:
+  #   true  = Do a full table sync to BigQuery, then record the max(updated_at)
+  #   false = Only record the max(updated_at) from source, skip sync, wait for next poll
+  # Default: false (conservative - don't sync existing data, only capture new changes)
+  update_all_if_ts_null: true

@@ -1,0 +1,3 @@
+# MySQL dependencies for BigQuery CDC Demo
+mysql-connector-python>=8.0.0
+PyYAML>=6.0
