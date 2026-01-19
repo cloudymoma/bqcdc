@@ -470,7 +470,3 @@ This demo uses minimal resources:
 - **Storage Write API**: Uses `STORAGE_API_AT_LEAST_ONCE` method for CDC writes
 - **Stateful Processing**: Uses Beam's `ValueState` for tracking last processed timestamp
 - **CDC with Primary Key**: BigQuery table uses `PRIMARY KEY (id) NOT ENFORCED` for UPSERT semantics
-
-## License
-
-MIT License - Feel free to use and modify.
