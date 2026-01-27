@@ -12,6 +12,14 @@ A complete demonstration of Change Data Capture (CDC) from MySQL to BigQuery usi
 
 The pipeline continuously polls MySQL for changes based on the `updated_at` column and syncs modified records to BigQuery using the Storage Write API with UPSERT semantics.
 
+> **IMPORTANT**: This project is designed to demonstrate **how to use Dataflow to perform CDC into BigQuery** using the Storage Write API with UPSERT semantics. It is NOT a production-ready MySQL CDC solution.
+>
+> For production MySQL CDC that handles INSERT, UPDATE, and DELETE operations, you should use binlog-based solutions such as:
+> - [Debezium with Dataflow](https://github.com/GoogleCloudPlatform/DataflowTemplates/tree/master/v2/cdc-parent#deploying-the-connector) - Reads MySQL binlog for real-time change capture
+> - [Google Datastream](https://cloud.google.com/datastream) - Managed CDC service for MySQL to BigQuery
+>
+> This demo periodically reads the MySQL table and relies solely on the `updated_at` column for change detection, which **cannot detect DELETE operations**.
+
 ## Components
 
 | Component | Description |

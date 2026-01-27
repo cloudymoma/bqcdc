@@ -12,6 +12,14 @@
 
 该管道持续轮询 MySQL 中基于 `updated_at` 列的变更，并使用 Storage Write API 的 UPSERT 语义将修改的记录同步到 BigQuery。
 
+> **重要提示**：本项目旨在演示**如何使用 Dataflow 通过 Storage Write API 的 UPSERT 语义将数据 CDC 到 BigQuery**。这不是一个生产就绪的 MySQL CDC 解决方案。
+>
+> 对于需要处理 INSERT、UPDATE 和 DELETE 操作的生产环境 MySQL CDC，您应该使用基于 binlog 的解决方案，例如：
+> - [Debezium with Dataflow](https://github.com/GoogleCloudPlatform/DataflowTemplates/tree/master/v2/cdc-parent#deploying-the-connector) - 读取 MySQL binlog 进行实时变更捕获
+> - [Google Datastream](https://cloud.google.com/datastream) - MySQL 到 BigQuery 的托管 CDC 服务
+>
+> 本演示仅定期读取 MySQL 表，完全依赖 `updated_at` 列进行变更检测，**无法检测 DELETE 操作**。
+
 ## 组件
 
 | 组件 | 描述 |
