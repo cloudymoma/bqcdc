@@ -19,7 +19,7 @@
         <beam.version>2.75.0</beam.version>
         <slf4j.version>1.7.36</slf4j.version>
         <mysql.connector.version>8.4.0</mysql.connector.version>
-        <jackson.version>2.15.2</jackson.version>
+        <jackson.version>2.18.6</jackson.version>
     </properties>
 
     <!-- Dependency Management to enforce consistent versions -->
