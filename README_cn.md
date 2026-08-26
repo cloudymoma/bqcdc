@@ -80,6 +80,10 @@ sequenceDiagram
 
 该管道持续轮询 MySQL 中基于 `updated_at` 列的变更，并使用 Storage Write API 的 UPSERT 语义将修改的记录同步到 BigQuery。
 
+关于 BigQuery CDC 与 Dataflow 集成的详细信息，请参阅：
+- [BigQuery 变更数据捕获 (CDC) 官方文档](https://docs.cloud.google.com/bigquery/docs/change-data-capture)
+- [Google Cloud 官方博客：在 Dataflow 中使用 BigQuery 新的 CDC 功能](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)
+
 > **重要提示**：本项目旨在演示**如何使用 Dataflow 通过 Storage Write API 的 UPSERT 语义将数据 CDC 到 BigQuery**。这不是一个生产就绪的 MySQL CDC 解决方案。
 >
 > 对于需要处理 INSERT、UPDATE 和 DELETE 操作的生产环境 MySQL CDC，您应该使用基于 binlog 的解决方案，例如：
@@ -93,8 +97,8 @@ sequenceDiagram
 | 组件 | 描述 |
 |------|------|
 | **MySQL (Cloud SQL)** | 包含示例 item 表的源数据库 |
-| **Dataflow Pipeline** | 用于 CDC 处理的 Java/Apache Beam 管道 |
-| **BigQuery** | 目标数据仓库 |
+| **Dataflow Pipeline** | 用于 CDC 处理的 Java/Apache Beam 管道（参见 [Dataflow CDC 博客文章](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)） |
+| **BigQuery** | 支持原生 CDC 的目标数据仓库（参见 [BigQuery CDC 官方文档](https://docs.cloud.google.com/bigquery/docs/change-data-capture)） |
 
 ## 前置条件
 
@@ -552,6 +556,12 @@ make cleanup_mysql     # 删除 Cloud SQL 实例
 - **Storage Write API**：使用 `STORAGE_API_AT_LEAST_ONCE` 方法进行 CDC 写入
 - **有状态处理**：使用 Beam 的 `ValueState` 跟踪最后处理的时间戳
 - **带主键的 CDC**：BigQuery 表使用 `PRIMARY KEY (id) NOT ENFORCED` 实现 UPSERT 语义
+
+## 参考与相关文档
+
+- [BigQuery 变更数据捕获 (CDC) 官方文档](https://docs.cloud.google.com/bigquery/docs/change-data-capture)
+- [在 Dataflow 中使用 BigQuery 新的 CDC 功能（Google Cloud 博客）](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)
+- [Apache Beam BigQueryIO 官方文档](https://beam.apache.org/documentation/io/built-in/google-bigquery/)
 
 ## 许可证
 

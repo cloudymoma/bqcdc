@@ -80,6 +80,10 @@ sequenceDiagram
 
 The pipeline continuously polls MySQL for changes based on the `updated_at` column and syncs modified records to BigQuery using the Storage Write API with UPSERT semantics.
 
+For details on BigQuery CDC and Dataflow integration, see:
+- [BigQuery Change Data Capture (CDC) Official Documentation](https://docs.cloud.google.com/bigquery/docs/change-data-capture)
+- [Google Cloud Blog: Using BigQuery's new CDC capability in Dataflow](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)
+
 > **IMPORTANT**: This project is designed to demonstrate **how to use Dataflow to perform CDC into BigQuery** using the Storage Write API with UPSERT semantics. It is NOT a production-ready MySQL CDC solution.
 >
 > For production MySQL CDC that handles INSERT, UPDATE, and DELETE operations, you should use binlog-based solutions such as:
@@ -93,8 +97,8 @@ The pipeline continuously polls MySQL for changes based on the `updated_at` colu
 | Component | Description |
 |-----------|-------------|
 | **MySQL (Cloud SQL)** | Source database with sample item table |
-| **Dataflow Pipeline** | Java/Apache Beam pipeline for CDC processing |
-| **BigQuery** | Destination data warehouse |
+| **Dataflow Pipeline** | Java/Apache Beam pipeline for CDC processing (see [Dataflow CDC Blog Post](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)) |
+| **BigQuery** | Destination data warehouse with native CDC support (see [BigQuery CDC Docs](https://docs.cloud.google.com/bigquery/docs/change-data-capture)) |
 
 ## Prerequisites
 
@@ -551,3 +555,9 @@ This demo uses minimal resources:
 - **Storage Write API**: Uses `STORAGE_API_AT_LEAST_ONCE` method for CDC writes
 - **Stateful Processing**: Uses Beam's `ValueState` for tracking last processed timestamp
 - **CDC with Primary Key**: BigQuery table uses `PRIMARY KEY (id) NOT ENFORCED` for UPSERT semantics
+
+## References & Documentation
+
+- [BigQuery Change Data Capture (CDC) Official Documentation](https://docs.cloud.google.com/bigquery/docs/change-data-capture)
+- [Using BigQuery's new CDC capability in Dataflow (Google Cloud Blog)](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)
+- [Apache Beam BigQueryIO Documentation](https://beam.apache.org/documentation/io/built-in/google-bigquery/)
