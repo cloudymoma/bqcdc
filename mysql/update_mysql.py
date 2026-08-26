@@ -56,12 +56,20 @@ def get_instance_ip(project_id, instance_name):
     cmd = [
         "gcloud", "sql", "instances", "describe", instance_name,
         "--project", project_id,
-        "--format", "value(ipAddresses[0].ipAddress)"
+        "--format", "value(ipAddresses.filter(type:PRIMARY).ipAddress)"
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to get instance IP: {result.stderr}")
     ip = result.stdout.strip()
+    if not ip or result.returncode != 0:
+        cmd = [
+            "gcloud", "sql", "instances", "describe", instance_name,
+            "--project", project_id,
+            "--format", "value(ipAddresses[0].ipAddress)"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to get instance IP: {result.stderr}")
+        ip = result.stdout.strip()
     print(f"[INFO] Instance IP: {ip}")
     return ip
 
@@ -72,7 +80,7 @@ def update_random_record(cursor, table_name):
     record_id = random.randint(1, 10)
 
     # Get current price
-    cursor.execute(f"SELECT price, description FROM `{table_name}` WHERE id = {record_id}")
+    cursor.execute(f"SELECT price, description FROM `{table_name}` WHERE id = %s", (record_id,))
     result = cursor.fetchone()
     if not result:
         print(f"[WARN] Record {record_id} not found")
@@ -85,11 +93,10 @@ def update_random_record(cursor, table_name):
     new_price = round(random.uniform(10.0, 500.0), 2)
 
     # Update the record with new price and current timestamp
-    cursor.execute(f"""
-        UPDATE `{table_name}`
-        SET price = {new_price}, updated_at = NOW()
-        WHERE id = {record_id}
-    """)
+    cursor.execute(
+        f"UPDATE `{table_name}` SET price = %s, updated_at = NOW() WHERE id = %s",
+        (new_price, record_id)
+    )
 
     return {
         "id": record_id,

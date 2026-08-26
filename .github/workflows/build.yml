@@ -26,6 +26,10 @@ jobs:
         working-directory: ./dataflow
         run: mvn clean compile -Pdataflow -B
 
+      - name: Run Tests
+        working-directory: ./dataflow
+        run: mvn test -B
+
       - name: Package JAR
         working-directory: ./dataflow
         run: mvn package -DskipTests -Pdataflow -B

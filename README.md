@@ -6,9 +6,77 @@ English | [中文](README_cn.md)
 
 A complete demonstration of Change Data Capture (CDC) from MySQL to BigQuery using Google Cloud Platform services.
 
-## Architecture
+## Architecture & How It Works
 
 ![BigQuery CDC Architecture](miscs/bqcdc_arch.png)
+
+### Data Pipeline Flow
+
+```mermaid
+flowchart LR
+    subgraph MySQL["Cloud SQL (MySQL 8.0)"]
+        SourceTable[("dingocdc.item\n- id (PK)\n- description\n- price\n- created_at\n- updated_at")]
+        Updater["update_mysql.py\n(Continuous updates)"]
+        Updater -->|"UPDATE price, updated_at"| SourceTable
+    end
+
+    subgraph Dataflow["Google Cloud Dataflow (Streaming Engine)"]
+        Trigger["1. GenerateSequence\n(Trigger every 10s)"]
+        Keying["2. MapElements\n(Add key 'cdc-poller')"]
+        Poller["3. StreamingCdcPollerFn (Stateful ParDo)\n- ValueState: lastUpdatedAt\n- ValueState: isFirstPoll"]
+        BQWriter["4. BigQueryIO.writeTableRows()\n- Method: STORAGE_API_AT_LEAST_ONCE\n- PrimaryKey: ['id']\n- RowMutationInformation: UPSERT"]
+        
+        Trigger --> Keying --> Poller --> BQWriter
+    end
+
+    subgraph BigQuery["Google Cloud BigQuery"]
+        TargetTable[("dingocdc.item\n- id INT64 (PRIMARY KEY)\n- description STRING\n- price FLOAT64\n- created_at DATETIME\n- updated_at DATETIME\nCLUSTER BY id")]
+    end
+
+    SourceTable -.->|"JDBC Query:\nWHERE updated_at > watermark"| Poller
+    BQWriter -->|"Storage Write API\n(UPSERT with sequence_number)"| TargetTable
+```
+
+### CDC Processing Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as MySQL Generator (update_mysql.py)
+    participant DB as Cloud SQL MySQL
+    participant DF as Dataflow (Beam CDC Pipeline)
+    participant BQ as BigQuery Target Table
+
+    Note over DF: Startup (First Poll)
+    alt updateAllIfTsNull = true
+        DF->>DB: SELECT * FROM item ORDER BY updated_at
+        DB-->>DF: Return all existing rows
+        DF->>DF: Set lastUpdatedAt = MAX(updated_at)
+        DF->>BQ: Storage Write API (UPSERT all rows)
+    else updateAllIfTsNull = false
+        DF->>DB: SELECT MAX(updated_at) FROM item
+        DB-->>DF: Return max_ts
+        DF->>DF: Set lastUpdatedAt = max_ts (no write)
+    end
+
+    Note over App,DB: Continuous Updates
+    loop Every 1-3 seconds
+        App->>DB: UPDATE item SET price = new_price, updated_at = NOW() WHERE id = X
+    end
+
+    Note over DF: Streaming Poller Loop
+    loop Every polling_interval_seconds (default: 10s)
+        DF->>DB: SELECT * FROM item WHERE updated_at > lastUpdatedAt ORDER BY updated_at
+        alt Changes Detected
+            DB-->>DF: Return modified rows
+            DF->>DF: Update lastUpdatedAt watermark
+            DF->>BQ: Storage Write API (UPSERT modified rows)
+            BQ-->>BQ: Merge row in-place by PRIMARY KEY (id)
+        else No Changes
+            DB-->>DF: 0 rows returned (skip BigQuery write)
+        end
+    end
+```
 
 The pipeline continuously polls MySQL for changes based on the `updated_at` column and syncs modified records to BigQuery using the Storage Write API with UPSERT semantics.
 
@@ -190,6 +258,7 @@ cdc:
 | `make init_mysql` | Create Cloud SQL instance and seed data |
 | `make update_mysql` | Start continuous MySQL updates |
 | `make init_bq` | Create BigQuery dataset and table |
+| `make test` | Run Dataflow pipeline unit tests |
 | `make build_dataflow` | Build Dataflow pipeline JAR |
 | `make run_cdc` | Launch Dataflow CDC job |
 | `make status` | Show status of all components |
@@ -471,7 +540,7 @@ This demo uses minimal resources:
 
 | Dependency | Version | Notes |
 |------------|---------|-------|
-| Apache Beam | 2.70.0 | Core streaming framework |
+| Apache Beam | 2.75.0 | Core streaming framework |
 | google-auth-library | 1.34.0+ | Required for mTLS support (CertificateSourceUnavailableException) |
 | MySQL Connector/J | 8.0.33 | JDBC driver for MySQL |
 | Java | 11+ | Runtime requirement |

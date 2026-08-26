@@ -10,25 +10,25 @@ PYTHON3 ?= python3
 # Configuration file
 CONFIG_FILE := conf.yml
 
-# Extract configuration values using yq or Python
-PROJECT_ID := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['gcp']['project_id'])")
-REGION := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['gcp']['region'])")
-SA_PATH := $(shell $(PYTHON3) -c "import yaml; import os; print(os.path.expanduser(yaml.safe_load(open('$(CONFIG_FILE)'))['gcp']['service_account_path']))")
+# Extract configuration values using yq or Python (suppress errors if dependencies not yet installed)
+PROJECT_ID := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['gcp']['project_id'])" 2>/dev/null)
+REGION := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['gcp']['region'])" 2>/dev/null)
+SA_PATH := $(shell $(PYTHON3) -c "import yaml; import os; print(os.path.expanduser(yaml.safe_load(open('$(CONFIG_FILE)'))['gcp']['service_account_path']))" 2>/dev/null)
 
-MYSQL_INSTANCE := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['mysql']['instance_name'])")
-MYSQL_DB := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['mysql']['db_name'])")
-MYSQL_TABLE := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['mysql']['table_name'])")
+MYSQL_INSTANCE := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['mysql']['instance_name'])" 2>/dev/null)
+MYSQL_DB := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['mysql']['db_name'])" 2>/dev/null)
+MYSQL_TABLE := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['mysql']['table_name'])" 2>/dev/null)
 
-BQ_DATASET := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['bigquery']['dataset'])")
-BQ_TABLE := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['bigquery']['table_name'])")
+BQ_DATASET := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['bigquery']['dataset'])" 2>/dev/null)
+BQ_TABLE := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['bigquery']['table_name'])" 2>/dev/null)
 
-DATAFLOW_JOB := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['dataflow']['job_name'])")
-DATAFLOW_WORKERS := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['dataflow']['num_workers'])")
-DATAFLOW_MACHINE := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['dataflow']['machine_type'])")
+DATAFLOW_JOB := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['dataflow']['job_name'])" 2>/dev/null)
+DATAFLOW_WORKERS := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['dataflow']['num_workers'])" 2>/dev/null)
+DATAFLOW_MACHINE := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['dataflow']['machine_type'])" 2>/dev/null)
 
 # Streaming CDC Configuration
-POLLING_INTERVAL := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['cdc']['polling_interval_seconds'])")
-UPDATE_ALL_IF_TS_NULL := $(shell $(PYTHON3) -c "import yaml; print(str(yaml.safe_load(open('$(CONFIG_FILE)'))['cdc']['update_all_if_ts_null']).lower())")
+POLLING_INTERVAL := $(shell $(PYTHON3) -c "import yaml; print(yaml.safe_load(open('$(CONFIG_FILE)'))['cdc']['polling_interval_seconds'])" 2>/dev/null)
+UPDATE_ALL_IF_TS_NULL := $(shell $(PYTHON3) -c "import yaml; print(str(yaml.safe_load(open('$(CONFIG_FILE)'))['cdc']['update_all_if_ts_null']).lower())" 2>/dev/null)
 
 # GCS bucket for Dataflow temp/staging
 GCS_BUCKET := gs://$(PROJECT_ID)-dataflow-temp
@@ -36,7 +36,7 @@ GCS_BUCKET := gs://$(PROJECT_ID)-dataflow-temp
 # Python virtual environment
 VENV_DIR := .venv
 
-.PHONY: help setup install_deps init_mysql update_mysql init_bq build_dataflow run_cdc \
+.PHONY: help setup install_deps init_mysql update_mysql init_bq test build_dataflow run_cdc \
         clean cleanup_mysql cleanup_bq cleanup_dataflow cleanup_all status
 
 # Default target
@@ -52,6 +52,7 @@ help:
 	@echo "║    make init_mysql     - Create Cloud SQL instance & seed data    ║"
 	@echo "║    make update_mysql   - Continuously update MySQL records        ║"
 	@echo "║    make init_bq        - Create BigQuery dataset and table        ║"
+	@echo "║    make test           - Run pipeline unit tests                  ║"
 	@echo "║    make build_dataflow - Build Dataflow pipeline JAR              ║"
 	@echo "║    make run_cdc        - Launch Dataflow CDC job                  ║"
 	@echo "║                                                                    ║"
@@ -80,16 +81,17 @@ help:
 # Setup virtual environment and install dependencies
 # Uses --extra-index-url to ensure public PyPI is checked for packages
 setup:
-	@echo "╔══════════════════════════════════════════════════════════════════╗"
-	@echo "║  Setting up Python virtual environment...                         ║"
-	@echo "╚══════════════════════════════════════════════════════════════════╝"
-	$(PYTHON3) -m venv $(VENV_DIR)
-	$(VENV_DIR)/bin/pip install --upgrade pip
-	$(VENV_DIR)/bin/pip install --extra-index-url https://pypi.org/simple/ -r mysql/requirements.txt
-	$(VENV_DIR)/bin/pip install --extra-index-url https://pypi.org/simple/ -r bigquery/requirements.txt
-	@echo ""
-	@echo "[SUCCESS] Virtual environment created at $(VENV_DIR)"
-	@echo "[INFO] Activate with: source $(VENV_DIR)/bin/activate"
+	@if [ ! -f "$(VENV_DIR)/bin/python" ]; then \
+		echo "╔══════════════════════════════════════════════════════════════════╗"; \
+		echo "║  Setting up Python virtual environment...                         ║"; \
+		echo "╚══════════════════════════════════════════════════════════════════╝"; \
+		$(PYTHON3) -m venv $(VENV_DIR); \
+		$(VENV_DIR)/bin/pip install --upgrade pip; \
+		echo ""; \
+		echo "[SUCCESS] Virtual environment created at $(VENV_DIR)"; \
+		echo "[INFO] Activate with: source $(VENV_DIR)/bin/activate"; \
+	fi
+	@$(VENV_DIR)/bin/pip install -q --extra-index-url https://pypi.org/simple/ -r mysql/requirements.txt -r bigquery/requirements.txt
 
 # Install dependencies only (assumes venv is activated)
 install_deps:
@@ -99,12 +101,12 @@ install_deps:
 	@echo "[SUCCESS] Dependencies installed"
 
 # Initialize MySQL (Cloud SQL instance + database + table + seed data)
-init_mysql:
+init_mysql: setup
 	@echo "╔══════════════════════════════════════════════════════════════════╗"
 	@echo "║  Initializing MySQL (Cloud SQL)                                   ║"
 	@echo "╠══════════════════════════════════════════════════════════════════╣"
 	@echo "║  This will:                                                       ║"
-	@echo "║    1. Create Cloud SQL MySQL 8.0 instance                         ║"
+	@echo "║    1. Create Cloud SQL MySQL 8.4 instance                         ║"
 	@echo "║    2. Generate and save root password                             ║"
 	@echo "║    3. Configure public access                                     ║"
 	@echo "║    4. Create database and table                                   ║"
@@ -118,7 +120,7 @@ init_mysql:
 	fi
 
 # Continuously update MySQL records
-update_mysql:
+update_mysql: setup
 	@echo "╔══════════════════════════════════════════════════════════════════╗"
 	@echo "║  Starting MySQL Continuous Update                                 ║"
 	@echo "║  Press Ctrl+C to stop                                             ║"
@@ -131,7 +133,7 @@ update_mysql:
 	fi
 
 # Initialize BigQuery (dataset + table)
-init_bq:
+init_bq: setup
 	@echo "╔══════════════════════════════════════════════════════════════════╗"
 	@echo "║  Initializing BigQuery                                            ║"
 	@echo "╠══════════════════════════════════════════════════════════════════╣"
@@ -145,6 +147,17 @@ init_bq:
 	else \
 		GOOGLE_APPLICATION_CREDENTIALS="$(SA_PATH)" $(PYTHON3) bigquery/init_bq.py; \
 	fi
+
+# Build Dataflow pipeline JAR
+# Run unit tests
+test:
+	@echo "╔══════════════════════════════════════════════════════════════════╗"
+	@echo "║  Running Unit Tests                                               ║"
+	@echo "╚══════════════════════════════════════════════════════════════════╝"
+	@echo ""
+	cd dataflow && mvn test
+	@echo ""
+	@echo "[SUCCESS] All tests passed!"
 
 # Build Dataflow pipeline JAR
 build_dataflow:
@@ -161,8 +174,8 @@ create_gcs_bucket:
 	@echo "[INFO] Creating GCS bucket for Dataflow: $(GCS_BUCKET)"
 	-gsutil mb -p $(PROJECT_ID) -l $(REGION) $(GCS_BUCKET) 2>/dev/null || true
 
-# Get MySQL instance IP
-MYSQL_IP := $(shell gcloud sql instances describe $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --format="value(ipAddresses[0].ipAddress)" 2>/dev/null || echo "UNKNOWN")
+# Get MySQL instance IP (prioritize public/PRIMARY IP)
+MYSQL_IP := $(shell gcloud sql instances describe $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --quiet --format="value(ipAddresses.filter(type:PRIMARY).ipAddress)" 2>/dev/null || gcloud sql instances describe $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --quiet --format="value(ipAddresses[0].ipAddress)" 2>/dev/null || echo "UNKNOWN")
 
 # Run Dataflow CDC job (supports --update for existing jobs)
 run_cdc: create_gcs_bucket
@@ -180,17 +193,23 @@ run_cdc: create_gcs_bucket
 		exit 1; \
 	fi
 	@MYSQL_PASSWORD=$$(cat mysql.password); \
-	MYSQL_HOST=$$(gcloud sql instances describe $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --format="value(ipAddresses[0].ipAddress)"); \
+	MYSQL_HOST=$$(gcloud sql instances describe $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --quiet --format="value(ipAddresses.filter(type:PRIMARY).ipAddress)" 2>/dev/null); \
+	if [ -z "$$MYSQL_HOST" ]; then \
+		MYSQL_HOST=$$(gcloud sql instances describe $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --quiet --format="value(ipAddresses[0].ipAddress)" 2>/dev/null); \
+	fi; \
 	echo "[INFO] MySQL Host: $$MYSQL_HOST"; \
 	UPDATE_FLAG=""; \
-	EXISTING_JOB=$$(gcloud dataflow jobs list --project=$(PROJECT_ID) --region=$(REGION) \
+	EXISTING_JOB=$$(gcloud dataflow jobs list --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --region=$(REGION) \
 		--filter="name=$(DATAFLOW_JOB) AND (state=Running OR state=Pending OR state=Queued)" \
-		--format="value(id)" --limit=1 2>/dev/null); \
+		--format="value(id)" --limit=1 --quiet 2>/dev/null); \
 	if [ -n "$$EXISTING_JOB" ]; then \
 		echo "[INFO] Found existing job: $$EXISTING_JOB - will update in-place"; \
 		UPDATE_FLAG="--update"; \
 	else \
 		echo "[INFO] No existing job found - creating new job"; \
+	fi; \
+	if [ -f "$(SA_PATH)" ]; then \
+		export GOOGLE_APPLICATION_CREDENTIALS="$(SA_PATH)"; \
 	fi; \
 	echo "[INFO] Starting Dataflow job..."; \
 	cd dataflow && mvn exec:java -Pdataflow \
@@ -205,7 +224,7 @@ status:
 	@echo ""
 	@echo "MySQL (Cloud SQL):"
 	@echo "  Instance: $(MYSQL_INSTANCE)"
-	@gcloud sql instances describe $(MYSQL_INSTANCE) --project=$(PROJECT_ID) \
+	@gcloud sql instances describe $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --quiet \
 		--format="table(state,ipAddresses[0].ipAddress,settings.tier)" 2>/dev/null || \
 		echo "  Status: NOT FOUND"
 	@echo ""
@@ -219,7 +238,7 @@ status:
 		echo "  Status: NOT FOUND"
 	@echo ""
 	@echo "Dataflow Jobs:"
-	@gcloud dataflow jobs list --project=$(PROJECT_ID) --region=$(REGION) \
+	@gcloud dataflow jobs list --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --region=$(REGION) --quiet \
 		--filter="name:$(DATAFLOW_JOB)" --limit=3 2>/dev/null || \
 		echo "  No jobs found"
 
@@ -237,7 +256,7 @@ cleanup_mysql:
 	@echo "[WARN] This will DELETE the Cloud SQL instance: $(MYSQL_INSTANCE)"
 	@read -p "Are you sure? (yes/no): " confirm && \
 	if [ "$$confirm" = "yes" ]; then \
-		gcloud sql instances delete $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --quiet; \
+		gcloud sql instances delete $(MYSQL_INSTANCE) --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --quiet; \
 		rm -f mysql.password; \
 		echo "[SUCCESS] MySQL instance deleted"; \
 	else \
@@ -258,10 +277,10 @@ cleanup_bq:
 # Cleanup Dataflow jobs
 cleanup_dataflow:
 	@echo "[INFO] Cancelling Dataflow jobs..."
-	@for job_id in $$(gcloud dataflow jobs list --project=$(PROJECT_ID) --region=$(REGION) \
-		--filter="name:$(DATAFLOW_JOB) AND state:Running" --format="value(id)"); do \
+	@for job_id in $$(gcloud dataflow jobs list --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --region=$(REGION) --quiet \
+		--filter="name:$(DATAFLOW_JOB) AND state:Running" --format="value(id)" 2>/dev/null); do \
 		echo "Cancelling job: $$job_id"; \
-		gcloud dataflow jobs cancel $$job_id --project=$(PROJECT_ID) --region=$(REGION); \
+		gcloud dataflow jobs cancel $$job_id --project=$(PROJECT_ID) --billing-project=$(PROJECT_ID) --region=$(REGION) --quiet; \
 	done
 	@echo "[SUCCESS] Dataflow jobs cancelled"
 

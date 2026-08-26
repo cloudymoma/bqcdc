@@ -41,6 +41,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
@@ -62,8 +63,16 @@ import java.util.Arrays;
  */
 class StreamingCdcPollerFn extends DoFn<KV<String, Long>, TableRow> {
     private static final Logger LOG = LoggerFactory.getLogger(StreamingCdcPollerFn.class);
-    private static final DateTimeFormatter DT_FORMATTER =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneOffset.UTC);
+    public static final DateTimeFormatter DT_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    static {
+        try {
+            Class.forName("com.mysql.cj.jdbc.Driver");
+        } catch (ClassNotFoundException e) {
+            LOG.warn("MySQL JDBC Driver class not found in static initializer", e);
+        }
+    }
 
     private final String jdbcUrl;
     private final String username;
@@ -119,8 +128,8 @@ class StreamingCdcPollerFn extends DoFn<KV<String, Long>, TableRow> {
         try (Connection conn = DriverManager.getConnection(fullJdbcUrl, username, password)) {
             LOG.info("MySQL connection established successfully");
 
-            // CASE 1: First poll with null timestamp
-            if (isFirstPoll && lastUpdatedAt == null) {
+            // CASE 1: First poll or null timestamp
+            if (lastUpdatedAt == null) {
                 handleFirstPoll(conn, c, lastUpdatedAtState, isFirstPollState);
                 return;
             }
@@ -263,25 +272,20 @@ class StreamingCdcPollerFn extends DoFn<KV<String, Long>, TableRow> {
 
     /**
      * Convert a ResultSet row to a BigQuery TableRow.
-     * CDC UPSERT is handled via RowMutationInformation in the BigQueryIO write.
-     * We store the updated_at timestamp as _sequence_number for CDC ordering.
+     * TableRow matches BigQuery schema cleanly.
      */
-    private TableRow resultSetToTableRow(ResultSet rs) throws Exception {
-        java.sql.Timestamp updatedAt = rs.getTimestamp("updated_at");
-        long sequenceNumber = updatedAt != null ? updatedAt.getTime() : System.currentTimeMillis();
-
+    public static TableRow resultSetToTableRow(ResultSet rs) throws Exception {
         return new TableRow()
                 .set("id", rs.getInt("id"))
                 .set("description", rs.getString("description"))
                 .set("price", rs.getDouble("price"))
                 .set("created_at", formatTimestamp(rs.getTimestamp("created_at")))
-                .set("updated_at", formatTimestamp(updatedAt))
-                .set("_sequence_number", sequenceNumber);  // Used for CDC ordering
+                .set("updated_at", formatTimestamp(rs.getTimestamp("updated_at")));
     }
 
-    private String formatTimestamp(java.sql.Timestamp ts) {
+    public static String formatTimestamp(java.sql.Timestamp ts) {
         if (ts == null) return null;
-        return DT_FORMATTER.format(ts.toInstant());
+        return ts.toLocalDateTime().format(DT_FORMATTER);
     }
 }
 
@@ -314,10 +318,6 @@ public class CdcPipeline {
 
         // Create pipeline
         Pipeline pipeline = Pipeline.create(options);
-
-        // Build JDBC URL
-        String jdbcUrl = String.format("%s/%s?useSSL=false&allowPublicKeyRetrieval=true",
-                options.getMysqlJdbcUrl(), options.getMysqlDatabase());
 
         // Define BigQuery schema
         TableSchema bqSchema = new TableSchema()
@@ -366,11 +366,19 @@ public class CdcPipeline {
                         .withMethod(BigQueryIO.Write.Method.STORAGE_API_AT_LEAST_ONCE)
                         .withPrimaryKey(ImmutableList.of("id"))
                         .withRowMutationInformationFn(row -> {
-                            // Extract sequence number from the row (stored as _sequence_number)
-                            Object seqNum = row.get("_sequence_number");
-                            long sequenceNumber = seqNum != null ? ((Number) seqNum).longValue() : System.currentTimeMillis();
-                            // Remove the _sequence_number field before writing (it's not part of the schema)
-                            row.remove("_sequence_number");
+                            // Extract timestamp and deterministically compute sequence number
+                            Object updatedAtObj = row.get("updated_at");
+                            long sequenceNumber;
+                            if (updatedAtObj instanceof String) {
+                                try {
+                                    LocalDateTime ldt = LocalDateTime.parse((String) updatedAtObj, StreamingCdcPollerFn.DT_FORMATTER);
+                                    sequenceNumber = ldt.toInstant(ZoneOffset.UTC).toEpochMilli();
+                                } catch (Exception e) {
+                                    sequenceNumber = System.currentTimeMillis();
+                                }
+                            } else {
+                                sequenceNumber = System.currentTimeMillis();
+                            }
                             return RowMutationInformation.of(
                                     RowMutationInformation.MutationType.UPSERT,
                                     sequenceNumber);

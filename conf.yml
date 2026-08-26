@@ -14,8 +14,10 @@ mysql:
   table_name: "item"
   # Machine type for Cloud SQL instance
   tier: "db-f1-micro"
-  # MySQL version
-  version: "MYSQL_8_0"
+  # Cloud SQL edition (enterprise or enterprise_plus)
+  edition: "enterprise"
+  # MySQL version (LTS release)
+  version: "MYSQL_8_4"
   # Root user (default)
   root_user: "root"
 

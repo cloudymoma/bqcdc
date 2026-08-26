@@ -6,9 +6,77 @@
 
 一个完整的变更数据捕获（CDC）演示项目，使用 Google Cloud Platform 服务将数据从 MySQL 同步到 BigQuery。
 
-## 架构
+## 架构与工作原理
 
 ![BigQuery CDC 架构图](miscs/bqcdc_arch.png)
+
+### 数据流转图
+
+```mermaid
+flowchart LR
+    subgraph MySQL["Cloud SQL (MySQL 8.0)"]
+        SourceTable[("dingocdc.item\n- id (主键)\n- description\n- price\n- created_at\n- updated_at")]
+        Updater["update_mysql.py\n(持续更新)"]
+        Updater -->|"UPDATE price, updated_at"| SourceTable
+    end
+
+    subgraph Dataflow["Google Cloud Dataflow (Streaming Engine)"]
+        Trigger["1. GenerateSequence\n(每 10s 触发)"]
+        Keying["2. MapElements\n(添加键 'cdc-poller')"]
+        Poller["3. StreamingCdcPollerFn (有状态 ParDo)\n- ValueState: lastUpdatedAt\n- ValueState: isFirstPoll"]
+        BQWriter["4. BigQueryIO.writeTableRows()\n- 方法: STORAGE_API_AT_LEAST_ONCE\n- 主键: ['id']\n- RowMutationInformation: UPSERT"]
+        
+        Trigger --> Keying --> Poller --> BQWriter
+    end
+
+    subgraph BigQuery["Google Cloud BigQuery"]
+        TargetTable[("dingocdc.item\n- id INT64 (PRIMARY KEY)\n- description STRING\n- price FLOAT64\n- created_at DATETIME\n- updated_at DATETIME\nCLUSTER BY id")]
+    end
+
+    SourceTable -.->|"JDBC 查询:\nWHERE updated_at > watermark"| Poller
+    BQWriter -->|"Storage Write API\n(带 sequence_number 的 UPSERT)"| TargetTable
+```
+
+### CDC 处理时序图
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as MySQL 生成器 (update_mysql.py)
+    participant DB as Cloud SQL MySQL
+    participant DF as Dataflow (Beam CDC 管道)
+    participant BQ as BigQuery 目标表
+
+    Note over DF: 启动阶段 (首次轮询)
+    alt updateAllIfTsNull = true
+        DF->>DB: SELECT * FROM item ORDER BY updated_at
+        DB-->>DF: 返回所有现有行
+        DF->>DF: 记录 lastUpdatedAt = MAX(updated_at)
+        DF->>BQ: Storage Write API (UPSERT 全部行)
+    else updateAllIfTsNull = false
+        DF->>DB: SELECT MAX(updated_at) FROM item
+        DB-->>DF: 返回 max_ts
+        DF->>DF: 记录 lastUpdatedAt = max_ts (不写入 BQ)
+    end
+
+    Note over App,DB: 持续更新
+    loop 每 1-3 秒
+        App->>DB: UPDATE item SET price = new_price, updated_at = NOW() WHERE id = X
+    end
+
+    Note over DF: 流式轮询循环
+    loop 每 polling_interval_seconds (默认: 10s)
+        DF->>DB: SELECT * FROM item WHERE updated_at > lastUpdatedAt ORDER BY updated_at
+        alt 检测到变更
+            DB-->>DF: 返回修改的行
+            DF->>DF: 更新 lastUpdatedAt 水位线
+            DF->>BQ: Storage Write API (UPSERT 修改行)
+            BQ-->>BQ: 按主键 (id) 原地合并更新
+        else 无变更
+            DB-->>DF: 返回 0 行 (跳过 BigQuery 写入)
+        end
+    end
+```
 
 该管道持续轮询 MySQL 中基于 `updated_at` 列的变更，并使用 Storage Write API 的 UPSERT 语义将修改的记录同步到 BigQuery。
 
@@ -190,6 +258,7 @@ cdc:
 | `make init_mysql` | 创建 Cloud SQL 实例并填充数据 |
 | `make update_mysql` | 开始持续更新 MySQL |
 | `make init_bq` | 创建 BigQuery 数据集和表 |
+| `make test` | 运行 Dataflow 管道单元测试 |
 | `make build_dataflow` | 构建 Dataflow 管道 JAR |
 | `make run_cdc` | 启动 Dataflow CDC 作业 |
 | `make status` | 显示所有组件状态 |
@@ -472,7 +541,7 @@ make cleanup_mysql     # 删除 Cloud SQL 实例
 
 | 依赖 | 版本 | 说明 |
 |------|------|------|
-| Apache Beam | 2.70.0 | 核心流处理框架 |
+| Apache Beam | 2.75.0 | 核心流处理框架 |
 | google-auth-library | 1.34.0+ | mTLS 支持所需（CertificateSourceUnavailableException） |
 | MySQL Connector/J | 8.0.33 | MySQL 的 JDBC 驱动 |
 | Java | 11+ | 运行时要求 |

@@ -91,9 +91,16 @@ def get_instance_ip(project_id, instance_name):
     result = run_gcloud([
         "sql", "instances", "describe", instance_name,
         "--project", project_id,
-        "--format", "value(ipAddresses[0].ipAddress)"
-    ])
+        "--format", "value(ipAddresses.filter(type:PRIMARY).ipAddress)"
+    ], check=False)
     ip = result.stdout.strip()
+    if not ip:
+        result = run_gcloud([
+            "sql", "instances", "describe", instance_name,
+            "--project", project_id,
+            "--format", "value(ipAddresses[0].ipAddress)"
+        ])
+        ip = result.stdout.strip()
     print(f"[INFO] Instance IP: {ip}")
     return ip
 
@@ -104,6 +111,7 @@ def create_mysql_instance(config, password):
     region = config["gcp"]["region"]
     instance_name = config["mysql"]["instance_name"]
     tier = config["mysql"]["tier"]
+    edition = config["mysql"].get("edition", "enterprise")
     version = config["mysql"]["version"]
 
     print(f"\n{'='*60}")
@@ -113,6 +121,7 @@ def create_mysql_instance(config, password):
     print(f"  Region: {region}")
     print(f"  Instance: {instance_name}")
     print(f"  Tier: {tier}")
+    print(f"  Edition: {edition}")
     print(f"  Version: {version}")
     print(f"{'='*60}\n")
 
@@ -128,50 +137,38 @@ def create_mysql_instance(config, password):
             "--project", project_id,
             "--password", password
         ])
-    else:
-        # Create instance with development preset (no high availability, lower resources)
-        print("[INFO] Creating new Cloud SQL instance (this may take several minutes)...")
+        # Ensure public access is enabled
+        print("[INFO] Ensuring public access is configured...")
         run_gcloud([
+            "sql", "instances", "patch", instance_name,
+            "--project", project_id,
+            "--assign-ip",
+            "--authorized-networks", "0.0.0.0/0",
+            "--quiet"
+        ])
+        wait_for_instance_ready(project_id, instance_name)
+    else:
+        # Create instance with public access directly
+        print("[INFO] Creating new Cloud SQL instance (this may take several minutes)...")
+        create_cmd = [
             "sql", "instances", "create", instance_name,
             "--project", project_id,
             "--region", region,
             "--database-version", version,
             "--tier", tier,
             "--root-password", password,
-            "--edition", "enterprise",
             "--availability-type", "zonal",
             "--storage-type", "HDD",
             "--storage-size", "10",
-            "--no-assign-ip",
-            "--network", f"projects/{project_id}/global/networks/default",
-        ])
+            "--assign-ip",
+            "--authorized-networks", "0.0.0.0/0",
+        ]
+        if edition:
+            create_cmd.extend(["--edition", edition])
+        run_gcloud(create_cmd)
 
         # Wait for instance to be ready
         wait_for_instance_ready(project_id, instance_name)
-
-    # Add authorized networks (0.0.0.0/0 for demo - public access)
-    print("[INFO] Configuring public access for demo purposes...")
-
-    # First, patch to add public IP
-    run_gcloud([
-        "sql", "instances", "patch", instance_name,
-        "--project", project_id,
-        "--assign-ip",
-        "--quiet"
-    ])
-
-    time.sleep(5)  # Wait for patch to apply
-
-    # Add authorized network
-    run_gcloud([
-        "sql", "instances", "patch", instance_name,
-        "--project", project_id,
-        "--authorized-networks", "0.0.0.0/0",
-        "--quiet"
-    ])
-
-    # Wait for instance to be ready again
-    wait_for_instance_ready(project_id, instance_name)
 
     return get_instance_ip(project_id, instance_name)
 
@@ -257,9 +254,9 @@ def create_database_and_table(host, user, password, config):
             desc = descriptions[i - 1]
             insert_sql = f"""
             INSERT INTO `{table_name}` (id, description, price)
-            VALUES ({i}, '{desc}', {price})
+            VALUES (%s, %s, %s)
             """
-            cursor.execute(insert_sql)
+            cursor.execute(insert_sql, (i, desc, price))
             print(f"  [+] Inserted: id={i}, description='{desc}', price=${price:.2f}")
 
         connection.commit()
