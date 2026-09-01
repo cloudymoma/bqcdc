@@ -1,4 +1,4 @@
-# BigQuery CDC 演示项目
+# BigQuery CDC 演示项目 - MySQL 到 BigQuery
 
 [![Build](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml/badge.svg)](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml)
 
