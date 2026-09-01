@@ -1,6 +1,6 @@
 # BigQuery CDC Demo - Pub/Sub to BigQuery
 
-[![Build](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml/badge.svg)](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml)
+[![Build](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml/badge.svg?branch=pubsub)](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml?query=branch%3Apubsub)
 
 English | [中文](README_cn.md)
 

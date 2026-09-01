@@ -2,9 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ pubsub ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ pubsub ]
 
 jobs:
   build-dataflow:
