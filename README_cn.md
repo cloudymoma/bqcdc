@@ -1,234 +1,244 @@
-# BigQuery CDC 演示项目
+# BigQuery CDC 演示 - Pub/Sub 到 BigQuery
 
 [![Build](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml/badge.svg)](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml)
 
 [English](README.md) | 中文
 
-一个完整的变更数据捕获（CDC）演示项目，使用 Google Cloud Platform 服务将数据从 MySQL 同步到 BigQuery。
+一个完整的变更数据捕获(CDC)演示项目:使用 Apache Beam 在 Google Cloud Dataflow 上运行流式管道,将 Google Cloud Pub/Sub 中的事件流实时同步到 BigQuery,并通过 BigQuery Storage Write API 实现真正的 **UPSERT** 与 **DELETE** 原地变更语义。
 
 ## 架构与工作原理
 
-![BigQuery CDC 架构图](miscs/bqcdc_arch.png)
-
-### 数据流转图
+### 数据管道流程
 
 ```mermaid
 flowchart LR
-    subgraph MySQL["Cloud SQL (MySQL 8.0)"]
-        SourceTable[("dingocdc.item\n- id (主键)\n- description\n- price\n- created_at\n- updated_at")]
-        Updater["update_mysql.py\n(持续更新)"]
-        Updater -->|"UPDATE price, updated_at"| SourceTable
+    subgraph Client["客户端应用"]
+        Generator["stream_publisher.py\n(持续事件生成器)"]
+    end
+
+    subgraph PubSub["Google Cloud Pub/Sub"]
+        Topic["主题: dingocdc-items"]
+        Sub["订阅: dingocdc-items-sub"]
+        Topic --> Sub
     end
 
     subgraph Dataflow["Google Cloud Dataflow (Streaming Engine)"]
-        Trigger["1. GenerateSequence\n(每 10s 触发)"]
-        Keying["2. MapElements\n(添加键 'cdc-poller')"]
-        Poller["3. StreamingCdcPollerFn (有状态 ParDo)\n- ValueState: lastUpdatedAt\n- ValueState: isFirstPoll"]
-        BQWriter["4. BigQueryIO.writeTableRows()\n- 方法: STORAGE_API_AT_LEAST_ONCE\n- 主键: ['id']\n- RowMutationInformation: UPSERT"]
-        
-        Trigger --> Keying --> Poller --> BQWriter
+        Source["1. PubsubIO.readStrings()\n.fromSubscription(sub)"]
+        Parser["2. ParseJsonToTableRowFn\n- 解析 JSON 负载\n- 提取变更类型与序列号"]
+        BQWriter["3. BigQueryIO.writeTableRows()\n- 方法: STORAGE_API_AT_LEAST_ONCE\n- 主键: ['id']\n- RowMutationInformation: UPSERT / DELETE"]
+
+        Source --> Parser --> BQWriter
     end
 
     subgraph BigQuery["Google Cloud BigQuery"]
-        TargetTable[("dingocdc.item\n- id INT64 (PRIMARY KEY)\n- description STRING\n- price FLOAT64\n- created_at DATETIME\n- updated_at DATETIME\nCLUSTER BY id")]
+        TargetTable[("dingocdc.item\n- id INT64 (主键)\n- description STRING\n- price FLOAT64\n- created_at DATETIME\n- updated_at DATETIME\nCLUSTER BY id")]
     end
 
-    SourceTable -.->|"JDBC 查询:\nWHERE updated_at > watermark"| Poller
-    BQWriter -->|"Storage Write API\n(带 sequence_number 的 UPSERT)"| TargetTable
+    Generator -->|"发布 JSON 事件\n(UPSERT / DELETE)"| Topic
+    Sub --> Source
+    BQWriter -->|"Storage Write API\n(按主键原地变更)"| TargetTable
 ```
 
-### CDC 处理时序图
+### CDC 处理时序
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant App as MySQL 生成器 (update_mysql.py)
-    participant DB as Cloud SQL MySQL
+    participant App as 事件生成器 (stream_publisher.py)
+    participant PS as Cloud Pub/Sub
     participant DF as Dataflow (Beam CDC 管道)
     participant BQ as BigQuery 目标表
 
-    Note over DF: 启动阶段 (首次轮询)
-    alt updateAllIfTsNull = true
-        DF->>DB: SELECT * FROM item ORDER BY updated_at
-        DB-->>DF: 返回所有现有行
-        DF->>DF: 记录 lastUpdatedAt = MAX(updated_at)
-        DF->>BQ: Storage Write API (UPSERT 全部行)
-    else updateAllIfTsNull = false
-        DF->>DB: SELECT MAX(updated_at) FROM item
-        DB-->>DF: 返回 max_ts
-        DF->>DF: 记录 lastUpdatedAt = max_ts (不写入 BQ)
-    end
+    Note over PS: 初始化 (init_pubsub.py)
+    App->>PS: 发布 10 条种子数据 (UPSERT)
 
-    Note over App,DB: 持续更新
+    Note over App,PS: 持续事件流
     loop 每 1-3 秒
-        App->>DB: UPDATE item SET price = new_price, updated_at = NOW() WHERE id = X
+        alt 约 85% 的事件
+            App->>PS: 发布 UPSERT 事件 (新增或更新)
+        else 约 15% 的事件
+            App->>PS: 发布 DELETE 事件
+        end
     end
 
-    Note over DF: 流式轮询循环
-    loop 每 polling_interval_seconds (默认: 10s)
-        DF->>DB: SELECT * FROM item WHERE updated_at > lastUpdatedAt ORDER BY updated_at
-        alt 检测到变更
-            DB-->>DF: 返回修改的行
-            DF->>DF: 更新 lastUpdatedAt 水位线
-            DF->>BQ: Storage Write API (UPSERT 修改行)
-            BQ-->>BQ: 按主键 (id) 原地合并更新
-        else 无变更
-            DB-->>DF: 返回 0 行 (跳过 BigQuery 写入)
+    Note over DF: 流式管道
+    loop 持续运行
+        PS-->>DF: 投递 JSON CDC 消息
+        DF->>DF: 解析 JSON -> TableRow (保留 _change_type, _sequence_number)
+        alt _change_type = UPSERT
+            DF->>BQ: Storage Write API (UPSERT + 序列号)
+            BQ-->>BQ: 按主键 (id) 原地合并行
+        else _change_type = DELETE
+            DF->>BQ: Storage Write API (DELETE + 序列号)
+            BQ-->>BQ: 按主键 (id) 删除行
         end
     end
 ```
 
-该管道持续轮询 MySQL 中基于 `updated_at` 列的变更，并使用 Storage Write API 的 UPSERT 语义将修改的记录同步到 BigQuery。
+管道从 Pub/Sub 订阅消费 CDC 事件,并通过 Storage Write API 的 `RowMutationInformation` 将变更原地应用到 BigQuery — `UPSERT` 事件按主键新增或更新行,`DELETE` 事件按主键删除行。`_sequence_number`(毫秒级时间戳)保证同一主键上变更的确定性顺序。
 
-关于 BigQuery CDC 与 Dataflow 集成的详细信息，请参阅：
+关于 BigQuery CDC 与 Dataflow 集成的详细信息,请参考:
 - [BigQuery 变更数据捕获 (CDC) 官方文档](https://docs.cloud.google.com/bigquery/docs/change-data-capture)
-- [Google Cloud 官方博客：在 Dataflow 中使用 BigQuery 新的 CDC 功能](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)
+- [Google Cloud 博客: 在 Dataflow 中使用 BigQuery 的全新 CDC 能力](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)
 
-> **重要提示**：本项目旨在演示**如何使用 Dataflow 通过 Storage Write API 的 UPSERT 语义将数据 CDC 到 BigQuery**。这不是一个生产就绪的 MySQL CDC 解决方案。
->
-> 对于需要处理 INSERT、UPDATE 和 DELETE 操作的生产环境 MySQL CDC，您应该使用基于 binlog 的解决方案，例如：
-> - [Debezium with Dataflow](https://github.com/GoogleCloudPlatform/DataflowTemplates/tree/master/v2/cdc-parent#deploying-the-connector) - 读取 MySQL binlog 进行实时变更捕获
-> - [Google Datastream](https://cloud.google.com/datastream) - MySQL 到 BigQuery 的托管 CDC 服务
->
-> 本演示仅定期读取 MySQL 表，完全依赖 `updated_at` 列进行变更检测，**无法检测 DELETE 操作**。
+> **说明**: 与基于时间戳轮询的方案不同,这种事件驱动设计支持完整的 CDC 操作 — 包括 **DELETE** — 因为每条消息都显式描述了变更内容。这与基于 binlog 的 CDC 方案(如 Debezium、Google Datastream)将变更事件发布到消息总线的模式完全一致。
+
+## 消息格式
+
+CDC 事件为 JSON 消息,包含数据负载和两个元数据字段:
+
+```json
+{
+  "id": 1,
+  "description": "Mechanical Keyboard",
+  "price": 129.99,
+  "created_at": "2026-09-01 10:00:00",
+  "updated_at": "2026-09-01 10:15:30",
+  "_change_type": "UPSERT",
+  "_sequence_number": 1788257730000
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| `_change_type` | `"UPSERT"` 或 `"DELETE"`(缺省默认为 `UPSERT`) |
+| `_sequence_number` | 毫秒级时间戳,用于保证同一主键上变更的确定性顺序 |
 
 ## 组件
 
-| 组件 | 描述 |
+| 组件 | 说明 |
 |------|------|
-| **MySQL (Cloud SQL)** | 包含示例 item 表的源数据库 |
-| **Dataflow Pipeline** | 用于 CDC 处理的 Java/Apache Beam 管道（参见 [Dataflow CDC 博客文章](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)） |
-| **BigQuery** | 支持原生 CDC 的目标数据仓库（参见 [BigQuery CDC 官方文档](https://docs.cloud.google.com/bigquery/docs/change-data-capture)） |
+| **Pub/Sub** | 承载 CDC 消息的事件流(主题 + 订阅) |
+| **Dataflow 管道** | Java/Apache Beam 流式 CDC 处理管道(参考 [Dataflow CDC 博客](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)) |
+| **BigQuery** | 支持原生 CDC 的目标数据仓库(参考 [BigQuery CDC 文档](https://docs.cloud.google.com/bigquery/docs/change-data-capture)) |
 
 ## 前置条件
 
-在开始之前，请确保您已具备：
+开始之前,请确保你已具备:
 
 1. **Google Cloud SDK** 已安装并配置
    ```bash
    gcloud --version
    ```
 
-2. **Java 11+** 和 **Maven 3.6+** 用于 Dataflow 管道
+2. **Java 11+** 和 **Maven 3.6+**(用于 Dataflow 管道)
    ```bash
    java -version
    mvn -version
    ```
 
-3. **Python 3.8+** 用于 MySQL 和 BigQuery 脚本
+3. **Python 3.8+**(用于 Pub/Sub 和 BigQuery 脚本)
    ```bash
    python3 --version
    ```
 
-4. **GCP 项目** 并启用以下 API：
-   - Cloud SQL Admin API
+4. **GCP 项目**,并启用以下 API:
+   - Pub/Sub API
    - BigQuery API
    - Dataflow API
    - Compute Engine API
 
-5. **服务账号** 并具备相应权限：
-   - Cloud SQL Admin
+5. **服务账号**,具备以下权限:
+   - Pub/Sub Admin
    - BigQuery Admin
    - Dataflow Admin
    - Storage Admin
 
 ## 快速开始
 
-### 步骤 1：克隆并配置
+### 第 1 步: 克隆并配置
 
 ```bash
 # 进入项目目录
 cd bqcdc
 
-# 查看并编辑配置文件（可选）
-# 默认值开箱即用
+# 查看并按需修改配置(可选)
+# 默认配置开箱即用
 cat conf.yml
 ```
 
-### 步骤 2：设置环境
+### 第 2 步: 准备环境
 
 ```bash
 # 创建虚拟环境并安装依赖
 make setup
 
-# 或者如果您希望全局安装依赖
+# 或者全局安装依赖
 make install_deps
 ```
 
-### 步骤 3：初始化 MySQL
+### 第 3 步: 初始化 Pub/Sub
 
 ```bash
-# 创建 Cloud SQL 实例、数据库和种子数据
-# 实例创建可能需要 5-10 分钟
-make init_mysql
+# 创建主题、订阅并发布种子数据
+make init_pubsub
 ```
 
-**此步骤执行的操作：**
-- 创建 Cloud SQL MySQL 8.0 实例
-- 生成安全的 root 密码（保存到 `mysql.password`）
-- 配置公网访问（仅用于演示目的）
-- 创建 `dingocdc` 数据库和 `item` 表
-- 插入 10 条示例记录
+**该命令会:**
+- 创建 `dingocdc-items` 主题(幂等)
+- 创建 `dingocdc-items-sub` 订阅(幂等)
+- 以 `UPSERT` 事件形式发布 10 条初始种子数据
 
-### 步骤 4：初始化 BigQuery
+### 第 4 步: 初始化 BigQuery
 
 ```bash
 # 创建 BigQuery 数据集和表
 make init_bq
 ```
 
-**此步骤执行的操作：**
+**该命令会:**
 - 创建 `dingocdc` 数据集
-- 创建具有匹配 schema 的 `item` 表
+- 创建带 `PRIMARY KEY (id) NOT ENFORCED` 和 `CLUSTER BY id` 的 `item` 表
 
-### 步骤 5：构建 Dataflow 管道
+### 第 5 步: 构建 Dataflow 管道
 
 ```bash
-# 构建 Java 管道 JAR 包
+# 构建 Java 管道 JAR
 make build_dataflow
 ```
 
-### 步骤 6：启动 CDC 管道
+### 第 6 步: 启动 CDC 管道
 
-打开 **终端 1** - 启动 Dataflow 作业：
+打开 **终端 1** - 启动 Dataflow 作业:
 ```bash
 make run_cdc
 ```
 
-### 步骤 7：生成数据变更
+### 第 7 步: 生成 CDC 事件
 
-打开 **终端 2** - 开始持续更新：
+打开 **终端 2** - 启动流式事件生成器:
 ```bash
-make update_mysql
+make stream_pubsub
 ```
 
-这将每 1-3 秒随机更新商品价格，直到您按 Ctrl+C 停止。
+生成器每 1-3 秒发布一条事件,其中约 85% 为 `UPSERT`、约 15% 为 `DELETE`,按 Ctrl+C 停止。
 
-### 步骤 8：在 BigQuery 中验证
+### 第 8 步: 在 BigQuery 中验证
 
 ```bash
-# 查询 BigQuery 表以查看同步的数据
-bq query --project_id=du-hast-mich \
+# 查询 BigQuery 表,查看同步数据
+bq query --project_id=du-hast-mich --use_legacy_sql=false \
   "SELECT * FROM dingocdc.item ORDER BY updated_at DESC LIMIT 10"
 ```
 
-或者使用 GCP 控制台中的 BigQuery Console。
+也可以使用 GCP 控制台中的 BigQuery Console。随着 UPSERT/DELETE 事件流入,你会看到行的新增、价格变化和删除。
 
-## 配置参考
+## 配置说明
 
-编辑 `conf.yml` 进行自定义：
+编辑 `conf.yml` 自定义配置:
 
 ```yaml
 gcp:
-  project_id: "du-hast-mich"          # 您的 GCP 项目 ID
+  project_id: "du-hast-mich"          # 你的 GCP 项目 ID
   region: "us-central1"                # GCP 区域
   service_account_path: "~/workspace/google/sa.json"
 
-mysql:
-  instance_name: "dingomysql"          # Cloud SQL 实例名称
-  db_name: "dingocdc"                  # 数据库名称
-  table_name: "item"                   # 表名称
-  tier: "db-f1-micro"                  # 机器类型
+pubsub:
+  topic_name: "dingocdc-items"         # Pub/Sub 主题
+  subscription_name: "dingocdc-items-sub"  # Pub/Sub 订阅
+  ack_deadline_seconds: 60             # Ack 截止时间
+  message_retention_duration: "604800s" # 消息保留 7 天
+  retain_acked_messages: false
 
 bigquery:
   dataset: "dingocdc"                  # BigQuery 数据集
@@ -236,262 +246,134 @@ bigquery:
   location: "US"                       # 数据集位置
 
 dataflow:
-  job_name: "dingo-cdc"                # Dataflow 作业名称
-  num_workers: 1                       # 初始 worker 数量
-  max_workers: 2                       # 最大 worker 数量
-  machine_type: "e2-medium"            # Worker 机器类型
+  job_name: "dingo-pubsub-cdc"         # Dataflow 作业名
+  num_workers: 1                       # 初始 worker 数
+  max_workers: 2                       # 最大 worker 数
+  machine_type: "e2-medium"            # Worker 机型
 
-cdc:
-  polling_interval_seconds: 10         # 轮询变更的频率
-  update_all_if_ts_null: true          # 启动行为（见下文）
+generator:
+  interval_min_seconds: 1.0            # 事件间最小间隔
+  interval_max_seconds: 3.0            # 事件间最大间隔
+  delete_ratio: 0.15                   # DELETE 事件占比
+  initial_items_count: 10              # 初始化种子数据条数
 ```
 
-### 流式 CDC 配置选项
+### 事件生成器配置项
 
-| 选项 | 默认值 | 描述 |
-|------|--------|------|
-| `polling_interval_seconds` | 10 | 管道轮询 MySQL 变更的频率（秒） |
-| `update_all_if_ts_null` | true | 控制管道启动时的行为：`true` = 先全表同步，`false` = 仅捕获新变更 |
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `interval_min_seconds` | 1.0 | 事件发布的最小间隔 |
+| `interval_max_seconds` | 3.0 | 事件发布的最大间隔 |
+| `delete_ratio` | 0.15 | DELETE 事件占比(其余为 UPSERT) |
+| `initial_items_count` | 10 | `init_pubsub` 发布的种子数据条数 |
 
-## Make 目标
+## Make 命令
 
-| 目标 | 描述 |
+| 命令 | 说明 |
 |------|------|
 | `make help` | 显示所有可用命令 |
 | `make setup` | 创建虚拟环境并安装依赖 |
-| `make init_mysql` | 创建 Cloud SQL 实例并填充数据 |
-| `make update_mysql` | 开始持续更新 MySQL |
+| `make init_pubsub` | 创建 Pub/Sub 主题和订阅并发布种子数据 |
+| `make stream_pubsub` | 启动持续 CDC 事件生成器 |
 | `make init_bq` | 创建 BigQuery 数据集和表 |
 | `make test` | 运行 Dataflow 管道单元测试 |
 | `make build_dataflow` | 构建 Dataflow 管道 JAR |
 | `make run_cdc` | 启动 Dataflow CDC 作业 |
-| `make status` | 显示所有组件状态 |
+| `make status` | 查看所有组件状态 |
+| `make cleanup_pubsub` | 删除 Pub/Sub 主题和订阅 |
+| `make cleanup_bq` | 删除 BigQuery 数据集 |
+| `make cleanup_dataflow` | 取消运行中的 Dataflow 作业 |
 | `make cleanup_all` | 删除所有 GCP 资源 |
 
 ### 自定义 Python 路径
 
-要使用自定义 Python 解释器，设置 `PYTHON3` 变量：
+通过 `PYTHON3` 变量指定 Python 解释器:
 
 ```bash
-# 使用特定 Python 版本
+# 使用指定版本的 Python
 make PYTHON3=/usr/bin/python3.11 setup
 
-# 使用 pyenv Python
-make PYTHON3=~/.pyenv/shims/python3 init_mysql
+# 使用 pyenv 的 Python
+make PYTHON3=~/.pyenv/shims/python3 init_pubsub
 
-# 使用 conda Python
+# 使用 conda 的 Python
 make PYTHON3=/opt/conda/bin/python3 init_bq
 ```
 
 ## 表结构
 
-| 列名 | 类型 | 描述 |
+| 列名 | 类型 | 说明 |
 |------|------|------|
-| `id` | INTEGER | 主键 (1-10) |
+| `id` | INT64 | 主键 |
 | `description` | STRING | 商品描述 |
-| `price` | FLOAT | 商品价格（随机更新） |
-| `created_at` | DATETIME | 记录创建时间戳 |
-| `updated_at` | DATETIME | 最后更新时间戳 |
+| `price` | FLOAT64 | 商品价格(随机更新) |
+| `created_at` | DATETIME | 记录创建时间 |
+| `updated_at` | DATETIME | 最后更新时间 |
 
 ## 项目结构
 
 ```
 bqcdc/
 ├── conf.yml                    # 配置文件
-├── Makefile                    # 构建和运行自动化
-├── README.md                   # 英文说明文档
-├── README_cn.md                # 中文说明文档（本文件）
-├── mysql.password              # 生成的 MySQL 密码（已加入 gitignore）
+├── Makefile                    # 构建与运行自动化
+├── README.md                   # 英文文档
+├── README_cn.md                # 本文件
 ├── .gitignore                  # Git 忽略规则
 │
-├── mysql/                      # MySQL 相关脚本
-│   ├── init_mysql.py           # 初始化 Cloud SQL 实例
-│   ├── update_mysql.py         # 持续更新脚本
+├── pubsub/                     # Pub/Sub 相关脚本
+│   ├── init_pubsub.py          # 创建主题/订阅 + 发布种子数据
+│   ├── stream_publisher.py     # 持续 CDC 事件生成器
 │   └── requirements.txt        # Python 依赖
 │
 ├── bigquery/                   # BigQuery 相关脚本
 │   ├── init_bq.py              # 初始化 BigQuery
 │   └── requirements.txt        # Python 依赖
 │
-└── dataflow/                   # Dataflow 管道（Java/Maven）
+└── dataflow/                   # Dataflow 管道 (Java/Maven)
     ├── pom.xml                 # Maven 配置
-    └── src/main/java/com/bindiego/cdc/
-        ├── CdcPipeline.java            # 带 UPSERT 的流式 CDC 管道
-        └── CdcPipelineOptions.java     # 管道选项接口
+    ├── src/main/java/com/bindiego/cdc/
+    │   ├── CdcPipeline.java            # 流式 CDC 管道 (UPSERT/DELETE)
+    │   └── CdcPipelineOptions.java     # 管道参数接口
+    └── src/test/java/com/bindiego/cdc/
+        ├── CdcPipelineTest.java        # 管道单元测试
+        └── CdcPipelineOptionsTest.java # 参数单元测试
 ```
 
-## 流式 CDC 逻辑
+## CDC 管道逻辑
 
-该管道使用 Apache Beam 的 `ValueState` 实现**有状态流式 CDC**方法，在内存中跟踪最后处理的 `updated_at` 时间戳。管道持续运行，并以可配置的间隔轮询 MySQL。
+管道是一个简洁的三阶段流式作业:
 
-### 工作原理
-
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                        流式 CDC 流程图                                      │
-├────────────────────────────────────────────────────────────────────────────┤
-│                                                                            │
-│  ┌─────────────────┐                                                       │
-│  │   管道启动      │                                                       │
-│  └────────┬────────┘                                                       │
-│           │                                                                │
-│           ▼                                                                │
-│  ┌─────────────────────┐                                                   │
-│  │ lastTimestamp       │                                                   │
-│  │ 为空？（首次轮询） │                                                   │
-│  └────────┬────────────┘                                                   │
-│           │                                                                │
-│     ┌─────┴─────┐                                                          │
-│     │           │                                                          │
-│    是          否                                                          │
-│     │           │                                                          │
-│     ▼           │                                                          │
-│  ┌──────────────────────┐                                                  │
-│  │ updateAllIfTsNull?   │                                                  │
-│  └──────────┬───────────┘                                                  │
-│             │                                                              │
-│      ┌──────┴──────┐                              ┌────────────────────┐   │
-│      │             │                              │                    │   │
-│    TRUE          FALSE                            │                    │   │
-│      │             │                              │                    ▼   │
-│      ▼             ▼                              │  ┌─────────────────────┐│
-│  ┌───────────┐  ┌───────────────────┐             │  │ 查询 updated_at >   ││
-│  │ 全量同步  │  │ 查询 MAX          │             │  │ lastTimestamp      ││
-│  │           │  │ (updated_at)      │             │  │ 的记录             ││
-│  │ 查询所有  │  │                   │             │  └──────────┬──────────┘│
-│  │ 记录      │  │ 记录时间戳        │             │             │           │
-│  │           │  │ （不同步数据）    │             │             ▼           │
-│  │ 同步到    │  │                   │             │  ┌─────────────────────┐│
-│  │ BigQuery  │  │ 等待下次轮询      │             │  │ 将变更的记录同步到 ││
-│  │           │  │                   │             │  │ BigQuery           ││
-│  │ 记录      │  └───────────────────┘             │  └──────────┬──────────┘│
-│  │ max(ts)   │                                    │             │           │
-│  └───────────┘                                    │             ▼           │
-│                                                   │  ┌─────────────────────┐│
-│                                                   │  │ 更新 lastTimestamp  ││
-│                                                   │  │ 为 max(updated_at)  ││
-│                                                   │  └──────────┬──────────┘│
-│                                                   │             │           │
-│                                                   └─────────────┤           │
-│                                                                 ▼           │
-│                                                   ┌─────────────────────┐   │
-│                                                   │ 等待 polling_interval│   │
-│                                                   │ 秒后重复            │   │
-│                                                   └─────────────────────┘   │
-└────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 详细逻辑
-
-#### 场景 1：首次轮询时 `lastTimestamp = NULL`
-
-**情况 A：`update_all_if_ts_null = true`（全表同步）**
-
-1. 查询：`SELECT * FROM table ORDER BY updated_at`
-2. 将所有记录发送到 BigQuery
-3. 记录 `max(updated_at)` 作为新的 `lastTimestamp`
-4. 后续轮询：仅捕获比 `lastTimestamp` 更新的记录
-
-**使用场景**：当您需要在捕获变更之前先将现有数据同步到 BigQuery。
-
-**情况 B：`update_all_if_ts_null = false`（仅增量）**
-
-1. 查询：`SELECT MAX(updated_at) FROM table`
-2. 将此时间戳记录为 `lastTimestamp`
-3. 不向 BigQuery 发送任何数据（无初始同步）
-4. 等待下次轮询以捕获新变更
-
-**使用场景**：当您只想捕获未来的新变更，忽略现有数据。
-
-#### 场景 2：后续轮询时 `lastTimestamp != NULL`
-
-对于首次之后的所有轮询：
-
-1. 查询：`SELECT * FROM table WHERE updated_at > lastTimestamp ORDER BY updated_at`
-2. 仅将变更的记录发送到 BigQuery
-3. 将 `lastTimestamp` 更新为获取记录中的 `max(updated_at)`
-4. 如果未发现变更，保持现有的 `lastTimestamp`
-
-### 示例工作流程
-
-```
-时间    事件                              lastTimestamp    BigQuery 操作
-─────   ─────                             ─────────────    ──────────────
-T0      管道启动                          NULL             -
-        (update_all_if_ts_null=false)
-        查询 MAX(updated_at)=10:00:00
-        记录时间戳                        10:00:00         未同步任何数据
-
-T1      轮询 #1（10 秒后）                10:00:00         -
-        查询 WHERE updated_at > 10:00
-        未找到记录                        10:00:00         未同步任何数据
-
-T2      MySQL UPDATE item SET             -                -
-        price=99.99 WHERE id=5
-        (updated_at = 10:00:15)
-
-T3      轮询 #2（10 秒后）                10:00:00         -
-        查询 WHERE updated_at > 10:00
-        找到 1 条记录 (id=5)
-        同步到 BigQuery                   10:00:15         插入 1 条记录
-        更新时间戳
-
-T4      轮询 #3（10 秒后）                10:00:15         -
-        查询 WHERE updated_at > 10:00:15
-        未找到记录                        10:00:15         未同步任何数据
-```
+1. **读取**: `PubsubIO.readStrings().fromSubscription(...)` 持续拉取 JSON CDC 消息。
+2. **解析**: `ParseJsonToTableRowFn` 将每条 JSON 消息转换为 BigQuery `TableRow`,并保留 `_change_type` 和 `_sequence_number` 元数据。格式错误的消息记录日志后丢弃。
+3. **写入**: `BigQueryIO.writeTableRows()` 配置:
+   - `STORAGE_API_AT_LEAST_ONCE` — 低延迟且兼容 CDC 的 Storage Write API 写入方式
+   - `withPrimaryKey(["id"])` — 声明变更主键
+   - `withRowMutationInformationFn(...)` — 将每行映射为带序列号的 `UPSERT` 或 `DELETE`
+   - `ignoreUnknownValues()` — CDC 元数据字段不属于目标表结构,写入时忽略
 
 ### 重要说明
 
-1. **BigQuery CDC 与 UPSERT**：该管道使用 BigQuery 原生 CDC 功能与 Storage Write API（`STORAGE_API_AT_LEAST_ONCE` 方法）。它使用 `RowMutationInformation` 与 `MutationType.UPSERT` 通过主键（`id`）更新现有行，而不是追加新行。`updated_at` 时间戳用作 CDC 排序的序列号。
+1. **BigQuery CDC 的 UPSERT 与 DELETE**: 管道使用 BigQuery 原生 CDC 能力(Storage Write API)。`RowMutationInformation` 的 `MutationType.UPSERT` 按主键原地更新行,`MutationType.DELETE` 按主键删除行。
 
-2. **需要主键**：BigQuery 表必须在 `id` 列上有 PRIMARY KEY 约束。`init_bq.py` 脚本创建的表带有 `PRIMARY KEY (id) NOT ENFORCED`。
+2. **必须有主键**: BigQuery 目标表必须在 `id` 列上定义 PRIMARY KEY 约束。`init_bq.py` 创建表时使用 `PRIMARY KEY (id) NOT ENFORCED`。
 
-3. **状态持久化**：`lastTimestamp` 存储在 Beam 的状态后端中。如果管道重启，根据 runner 配置，状态可能会丢失。对于生产环境，建议将水位线持久化到外部存储。
+3. **序列号**: BigQuery 按序列号顺序应用同一主键上的变更。生成器使用毫秒级时间戳,因此无论投递顺序如何,较新的事件总是生效。
 
-4. **时间戳精度**：使用 `>`（大于）比较以避免重复处理具有相同时间戳的记录。确保您的 `updated_at` 列具有足够的精度（建议毫秒级）。
+4. **至少一次投递**: Pub/Sub 与 `STORAGE_API_AT_LEAST_ONCE` 可能产生重复投递。由于 CDC 变更对 (主键, 序列号) 幂等,这里是安全的。
 
-5. **单线程轮询**：使用单个 key（"cdc-poller"）确保所有状态在一个地方管理。这会序列化轮询但保证一致性。
+## 故障排查
 
-## 本演示的局限性
-
-**重要提示**：本演示使用 `updated_at` 列来识别数据变更，这有一些局限性：
-
-1. **无法检测 DELETE**：从 MySQL 删除的记录不会被检测到或从 BigQuery 中移除。轮询方法只能看到 `updated_at > lastTimestamp` 的现有记录。
-
-2. **需要时间戳列**：您的源表必须有一个可靠更新的时间戳列。
-
-3. **较高延迟**：变更是按轮询间隔（默认 10 秒）检测的，而非实时。
-
-**对于生产用例**，建议使用基于 **binlog 的 CDC** 解决方案，例如：
-- **Google Datastream** - 读取 MySQL binlog 的托管 CDC 服务
-- **Debezium + Pub/Sub** - 开源 binlog 解析器配合消息队列
-
-这些解决方案可以实时捕获 INSERT、UPDATE 和 DELETE 操作。
-
-**然而，本演示的主要目的是说明如何使用 BigQuery 原生 CDC（Storage Write API 与 UPSERT 语义）编写 Apache Beam/Dataflow 代码**，而不是提供生产就绪的 CDC 解决方案。轮询机制故意保持简单，以便将重点放在 Dataflow 管道实现上。
-
-## CDC 方法对比
-
-| 方法 | 优点 | 缺点 |
-|------|------|------|
-| **本演示（轮询 + Storage Write API CDC）** | 真正的 UPSERT 语义，无需 binlog 访问，使用原生 BigQuery CDC，易于理解 | 不支持 DELETE，延迟较高，依赖 `updated_at` 列 |
-| **Google Datastream** | 托管服务，实时，基于 binlog，支持 DELETE | 额外的服务成本 |
-| **Debezium + Pub/Sub** | 实时，开源，支持 DELETE | 设置复杂，需要 binlog 访问权限 |
-
-## 故障排除
-
-### MySQL 连接问题
+### Pub/Sub 问题
 
 ```bash
-# 检查实例是否运行
-gcloud sql instances describe dingomysql --format="value(state)"
+# 检查主题是否存在
+gcloud pubsub topics describe dingocdc-items
 
-# 验证公网 IP 访问
-gcloud sql instances describe dingomysql --format="value(ipAddresses)"
+# 检查订阅是否存在
+gcloud pubsub subscriptions describe dingocdc-items-sub
 
-# 检查授权网络
-gcloud sql instances describe dingomysql --format="value(settings.ipConfiguration.authorizedNetworks)"
+# 手动拉取几条消息查看(不 ack)
+gcloud pubsub subscriptions pull dingocdc-items-sub --limit=5
 ```
 
 ### BigQuery 问题
@@ -500,7 +382,7 @@ gcloud sql instances describe dingomysql --format="value(settings.ipConfiguratio
 # 列出数据集
 bq ls --project_id=du-hast-mich
 
-# 描述表
+# 查看表信息
 bq show du-hast-mich:dingocdc.item
 ```
 
@@ -510,34 +392,34 @@ bq show du-hast-mich:dingocdc.item
 # 列出运行中的作业
 gcloud dataflow jobs list --region=us-central1 --filter="state:Running"
 
-# 查看作业日志
+# 查看作业详情
 gcloud dataflow jobs show JOB_ID --region=us-central1
 ```
 
-## 清理
+## 清理资源
 
-要删除本演示创建的所有 GCP 资源：
+删除本演示创建的所有 GCP 资源:
 
 ```bash
-# 取消 Dataflow 作业，删除 BigQuery 数据集和 Cloud SQL 实例
+# 取消 Dataflow 作业,删除 BigQuery 数据集、Pub/Sub 主题和订阅
 make cleanup_all
 ```
 
-或者单独清理：
+或者分别执行:
 ```bash
 make cleanup_dataflow  # 取消 Dataflow 作业
 make cleanup_bq        # 删除 BigQuery 数据集
-make cleanup_mysql     # 删除 Cloud SQL 实例
+make cleanup_pubsub    # 删除 Pub/Sub 主题和订阅
 ```
 
-## 成本考虑
+## 成本考量
 
-本演示使用最小资源：
-- **Cloud SQL**：`db-f1-micro`（如果 24/7 运行，约 $9/月）
-- **Dataflow**：1-2 个 `e2-medium` worker，带 Streaming Engine（按使用付费）
-- **BigQuery**：按查询/存储付费
+本演示使用的资源极少:
+- **Pub/Sub**: 按消息量计费(演示流量下几乎可忽略)
+- **Dataflow**: 1-2 台 `e2-medium` worker + Streaming Engine(按用量计费)
+- **BigQuery**: 按查询/存储计费
 
-**建议**：完成后运行 `make cleanup_all` 以避免产生费用。
+**建议**: 完成后运行 `make cleanup_all` 避免产生费用。
 
 ## 技术要求
 
@@ -545,24 +427,21 @@ make cleanup_mysql     # 删除 Cloud SQL 实例
 
 | 依赖 | 版本 | 说明 |
 |------|------|------|
-| Apache Beam | 2.75.0 | 核心流处理框架 |
-| google-auth-library | 1.34.0+ | mTLS 支持所需（CertificateSourceUnavailableException） |
-| MySQL Connector/J | 8.0.33 | MySQL 的 JDBC 驱动 |
+| Apache Beam | 2.75.0 | 核心流式框架 |
+| google-auth-library | 1.34.0+ | mTLS 支持所需 (CertificateSourceUnavailableException) |
+| Jackson | 2.18.x | JSON 消息解析 |
 | Java | 11+ | 运行时要求 |
 
 ### 使用的关键特性
 
-- **Streaming Engine**：通过 `--experiments=enable_streaming_engine` 启用，以获得更好的资源利用率
-- **Storage Write API**：使用 `STORAGE_API_AT_LEAST_ONCE` 方法进行 CDC 写入
-- **有状态处理**：使用 Beam 的 `ValueState` 跟踪最后处理的时间戳
-- **带主键的 CDC**：BigQuery 表使用 `PRIMARY KEY (id) NOT ENFORCED` 实现 UPSERT 语义
+- **Streaming Engine**: 通过 `--experiments=enable_streaming_engine` 启用,提升资源利用率
+- **Storage Write API**: 使用 `STORAGE_API_AT_LEAST_ONCE` 方式进行 CDC 写入
+- **Pub/Sub IO**: Beam 原生流式数据源,自动 ack
+- **带主键的 CDC**: BigQuery 表使用 `PRIMARY KEY (id) NOT ENFORCED` 实现 UPSERT/DELETE 语义
 
-## 参考与相关文档
+## 参考文档
 
 - [BigQuery 变更数据捕获 (CDC) 官方文档](https://docs.cloud.google.com/bigquery/docs/change-data-capture)
-- [在 Dataflow 中使用 BigQuery 新的 CDC 功能（Google Cloud 博客）](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)
-- [Apache Beam BigQueryIO 官方文档](https://beam.apache.org/documentation/io/built-in/google-bigquery/)
-
-## 许可证
-
-MIT 许可证 - 可自由使用和修改。
+- [在 Dataflow 中使用 BigQuery 的全新 CDC 能力 (Google Cloud 博客)](https://cloud.google.com/blog/products/data-analytics/using-bigquerys-new-cdc-capability-in-dataflow)
+- [Apache Beam BigQueryIO 文档](https://beam.apache.org/documentation/io/built-in/google-bigquery/)
+- [Apache Beam PubsubIO 文档](https://beam.apache.org/releases/javadoc/current/org/apache/beam/sdk/io/gcp/pubsub/PubsubIO.html)

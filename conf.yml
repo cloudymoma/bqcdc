@@ -1,4 +1,4 @@
-# BigQuery CDC Demo Configuration
+# BigQuery CDC Demo Configuration - Pub/Sub to BigQuery
 # All settings can be customized here
 
 # GCP Project Configuration
@@ -7,19 +7,13 @@ gcp:
   region: "us-central1"
   service_account_path: "~/workspace/google/sa.json"
 
-# MySQL Configuration (Cloud SQL)
-mysql:
-  instance_name: "dingomysql"
-  db_name: "dingocdc"
-  table_name: "item"
-  # Machine type for Cloud SQL instance
-  tier: "db-f1-micro"
-  # Cloud SQL edition (enterprise or enterprise_plus)
-  edition: "enterprise"
-  # MySQL version (LTS release)
-  version: "MYSQL_8_4"
-  # Root user (default)
-  root_user: "root"
+# Pub/Sub Configuration
+pubsub:
+  topic_name: "dingocdc-items"
+  subscription_name: "dingocdc-items-sub"
+  ack_deadline_seconds: 60
+  message_retention_duration: "604800s" # 7 days
+  retain_acked_messages: false
 
 # BigQuery Configuration
 bigquery:
@@ -30,7 +24,7 @@ bigquery:
 
 # Dataflow Configuration
 dataflow:
-  job_name: "dingo-cdc"
+  job_name: "dingo-pubsub-cdc"
   # Worker configuration
   num_workers: 1
   max_workers: 2
@@ -42,12 +36,9 @@ dataflow:
   # Staging location for Dataflow
   staging_location_suffix: "dataflow/staging"
 
-# Streaming CDC Configuration
-cdc:
-  # Polling interval in seconds - how often to check for changes
-  polling_interval_seconds: 10
-  # Behavior when the in-memory timestamp is null/empty at startup:
-  #   true  = Do a full table sync to BigQuery, then record the max(updated_at)
-  #   false = Only record the max(updated_at) from source, skip sync, wait for next poll
-  # Default: false (conservative - don't sync existing data, only capture new changes)
-  update_all_if_ts_null: true
+# Client Streaming Event Generator Configuration
+generator:
+  interval_min_seconds: 1.0
+  interval_max_seconds: 3.0
+  delete_ratio: 0.15 # ~15% of events are DELETEs, rest are INSERT/UPDATE (UPSERT)
+  initial_items_count: 10
