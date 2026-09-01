@@ -1,6 +1,6 @@
 # BigQuery CDC 演示项目 - MySQL 到 BigQuery
 
-[![Build](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml/badge.svg)](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml)
+[![Build](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml/badge.svg?branch=mysql)](https://github.com/cloudymoma/bqcdc/actions/workflows/build.yml?query=branch%3Amysql)
 
 [English](README.md) | 中文
 
